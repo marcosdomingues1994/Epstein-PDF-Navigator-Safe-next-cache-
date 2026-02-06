@@ -1,0 +1,154 @@
+// ==UserScript==
+// @name         Epstein PDF Navigator (Safe next + cache)
+// @namespace    https://justice.gov/epstein
+// @version      4.1
+// @match        https://www.justice.gov/epstein/files/DataSet%20*/EFTA*.pdf
+// @grant        none
+// ==/UserScript==
+
+(() => {
+  const DATASETS = [
+    { ds: 1,  start: 1,        end: 3158 },
+    { ds: 2,  start: 3159,     end: 3857 },
+    { ds: 3,  start: 3858,     end: 5704 },
+    { ds: 4,  start: 5705,     end: 8408 },
+    { ds: 5,  start: 8409,     end: 8528 },
+    { ds: 6,  start: 8529,     end: 9015 },
+    { ds: 7,  start: 9016,     end: 9675 },
+    { ds: 8,  start: 9676,     end: 39024 },
+    { ds: 9,  start: 39025,    end: 1262781 },
+    { ds: 10, start: 1262782,  end: 2205654 },
+    { ds: 11, start: 2205655,  end: 2730264 },
+    { ds: 12, start: 2730265,  end: 2731783 },
+  ];
+
+  const pad = n => String(n).padStart(8, '0');
+
+  const parseUrl = () => {
+    const m = location.href.match(/DataSet%20(\d+)\/EFTA(\d+)\.pdf/);
+    return { ds: +m[1], num: +m[2] };
+  };
+
+  const buildUrl = (ds, num) =>
+    `https://www.justice.gov/epstein/files/DataSet%20${ds}/EFTA${pad(num)}.pdf`;
+
+  const currentDatasetIndex = ds =>
+    DATASETS.findIndex(d => d.ds === ds);
+
+  // cache em memória
+  const validCache = new Set();
+  const invalidCache = new Set();
+
+  async function urlExists(url) {
+    if (validCache.has(url)) return true;
+    if (invalidCache.has(url)) return false;
+
+    try {
+      const res = await fetch(url, { method: 'HEAD' });
+      if (res.ok) {
+        validCache.add(url);
+        return true;
+      }
+    } catch {}
+
+    invalidCache.add(url);
+    return false;
+  }
+
+  async function findNextValid(ds, start, end, from, dir) {
+    const step = dir === 'next' ? 1 : -1;
+
+    // 1) SEMPRE testa o vizinho imediato primeiro (corrige o bug do 3862)
+    let cur = from + step;
+    if (cur >= start && cur <= end) {
+      if (await urlExists(buildUrl(ds, cur))) return cur;
+    }
+
+    // 2) varredura curta linear (até achar o próximo bundle ou pular um gap pequeno)
+    for (let i = 2; i <= 25; i++) {
+      cur = from + step * i;
+      if (cur < start || cur > end) break;
+      if (await urlExists(buildUrl(ds, cur))) return cur;
+    }
+
+    // 3) fallback: salto exponencial para gaps grandes
+    let jump = 32;
+    cur = from + step * jump;
+
+    while (cur >= start && cur <= end) {
+      if (await urlExists(buildUrl(ds, cur))) {
+        // refinamento para trás até o primeiro válido
+        let back = cur - step;
+        while (back >= start && back <= end) {
+          if (!(await urlExists(buildUrl(ds, back)))) break;
+          cur = back;
+          back -= step;
+        }
+        return cur;
+      }
+      jump *= 2;
+      cur = from + step * jump;
+    }
+
+    return null;
+  }
+
+  async function navigatePdf(dir) {
+    const { ds, num } = parseUrl();
+    const dataset = DATASETS[currentDatasetIndex(ds)];
+
+    const target = await findNextValid(
+      ds,
+      dataset.start,
+      dataset.end,
+      num,
+      dir
+    );
+
+    if (target != null) {
+      location.href = buildUrl(ds, target);
+    }
+  }
+
+  function navigateDataset(dir) {
+    const { ds } = parseUrl();
+    const idx = currentDatasetIndex(ds);
+    const targetIdx = dir === 'next' ? idx + 1 : idx - 1;
+    if (targetIdx < 0 || targetIdx >= DATASETS.length) return;
+
+    const targetDataset = DATASETS[targetIdx];
+    location.href = buildUrl(targetDataset.ds, targetDataset.start);
+  }
+
+  // UI
+  const box = document.createElement('div');
+  Object.assign(box.style, {
+    position: 'fixed',
+    right: '10px',
+    bottom: '10px',
+    zIndex: 9999,
+    background: 'rgba(0,0,0,0.75)',
+    padding: '10px',
+    borderRadius: '8px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+  });
+  document.body.appendChild(box);
+
+  function addButton(label, onClick) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    Object.assign(b.style, {
+      padding: '6px 10px',
+      cursor: 'pointer',
+    });
+    b.onclick = onClick;
+    box.appendChild(b);
+  }
+
+  addButton('⬅ FILE', () => navigatePdf('prev'));
+  addButton('FILE ➡', () => navigatePdf('next'));
+  addButton('⏪ DATASET', () => navigateDataset('prev'));
+  addButton('DATASET ⏩', () => navigateDataset('next'));
+})();
